@@ -7,20 +7,28 @@ on:
 jobs:
   build-ipa:
     runs-on: macos-latest
+    env:
+      CI: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install
-      - run: npx expo prebuild --platform ios --clean
+          node-version: 22
+      - name: Install Dependencies & Prebuild iOS
+        run: |
+          npm install
+          npx expo install babel-preset-expo react-native-webview @react-native-async-storage/async-storage expo-clipboard
+          npx expo prebuild --platform ios --clean
       - name: Build Unsigned IPA
         run: |
           cd ios
-          xcodebuild -workspace LocalFlix.xcworkspace \
-            -scheme LocalFlix \
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          SCHEME="${WORKSPACE%.xcworkspace}"
+          xcodebuild -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -28,7 +36,8 @@ jobs:
       - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -r ios/build/Build/Products/Release-iphoneos/LocalFlix.app Payload/
+          APP_BUNDLE=$(find ios/build/Build/Products/Release-iphoneos -name "*.app" -maxdepth 1 | head -n 1)
+          cp -r "$APP_BUNDLE" Payload/
           zip -r LocalFlix.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
