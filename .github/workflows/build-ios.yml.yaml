@@ -17,8 +17,13 @@ jobs:
       - name: Install Dependencies & Prebuild iOS
         run: |
           npm install
-          npx expo install babel-preset-expo react-native-webview @react-native-async-storage/async-storage expo-clipboard
+          npx expo install expo-asset babel-preset-expo react-native-webview @react-native-async-storage/async-storage expo-clipboard
           npx expo prebuild --platform ios --clean
+          echo "export NODE_BINARY=$(which node)" > ios/.xcode.env.local
+      - name: Verify JS Bundle (Fast Check)
+        run: |
+          npx expo export --platform ios --output-dir /tmp/test-bundle
+          rm -rf /tmp/test-bundle
       - name: Build Unsigned IPA
         run: |
           cd ios
