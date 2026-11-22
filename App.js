@@ -59,6 +59,20 @@ function resolveUrl(base, href) {
   return base.endsWith('/') ? base + href : `${base}/${href}`;
 }
 
+function pickBestImage(folderUrl, images) {
+  if (!images || images.length === 0) return '';
+  const sorted = images.slice().sort((a, b) => {
+    const score = (s) => {
+      const low = s.toLowerCase();
+      if (low.includes('poster') || low.includes('cover') || low.includes('folder')) return 3;
+      if (low.includes('thumb')) return 2;
+      return 1;
+    };
+    return score(b) - score(a);
+  });
+  return resolveUrl(folderUrl, sorted[0]);
+}
+
 function isChildUrl(parentUrl, childUrl) {
   const p = safeDecode(parentUrl).replace(/\/+$/, '').toLowerCase();
   const c = safeDecode(childUrl).replace(/\/+$/, '').toLowerCase();
@@ -260,7 +274,7 @@ export default function App() {
 
         const vid = candidates[0];
         const vidUrl = resolveUrl(folderUrl, vid);
-        const covUrl = images.length > 0 ? resolveUrl(folderUrl, images[0]) : '';
+        const covUrl = pickBestImage(folderUrl, images);
         const year = extractYear(folderName) || extractYear(vid);
         const isHd = isHdSource || /1080p/i.test(folderName) || /1080p/i.test(vid);
 
@@ -327,7 +341,6 @@ export default function App() {
         );
 
         completedSources++;
-        // Checkpoint completed movie categories to disk immediately
         try {
           const snapshot = dedupeAndSortMovies(movieResults);
           await AsyncStorage.setItem('movies_cache', JSON.stringify(snapshot));
@@ -355,26 +368,31 @@ export default function App() {
 
             if (/^(19|20)\d{2}$/.test(bareYear)) {
               const subLinks = await limit(() => fetchDirectoryLinksNative(linkUrl));
-              for (let j = 0; j < subLinks.length; j++) {
-                const slink = subLinks[j];
-                const subPart = slink.replace(/\/$/, '').split('/').pop() || '';
-                if (!slink.endsWith('/') && subPart.includes('.')) continue;
-                const subUrl = resolveUrl(linkUrl, slink);
-                if (!isChildUrl(linkUrl, subUrl)) continue;
-                const subName = safeDecode(subPart);
-                tvResults.push({
-                  id: `tv_${subUrl}`,
-                  type: 'series',
-                  title: cleanName(subName),
-                  year: extractYear(subName) || parseInt(bareYear, 10),
-                  category: tvSrc.category,
-                  is_hd: /1080p/i.test(subName),
-                  series_url: subUrl,
-                  cover_url: '',
-                  seasons: null,
-                });
-              }
+              await Promise.all(
+                subLinks.map(async (slink) => {
+                  const subPart = slink.replace(/\/$/, '').split('/').pop() || '';
+                  if (!slink.endsWith('/') && subPart.includes('.')) return;
+                  const subUrl = resolveUrl(linkUrl, slink);
+                  if (!isChildUrl(linkUrl, subUrl)) return;
+                  const subName = safeDecode(subPart);
+                  const inner = await limit(() => fetchDirectoryLinksNative(subUrl));
+                  const imgs = inner.filter((f) => IMAGE_EXT_RE.test(f));
+                  tvResults.push({
+                    id: `tv_${subUrl}`,
+                    type: 'series',
+                    title: cleanName(subName),
+                    year: extractYear(subName) || parseInt(bareYear, 10),
+                    category: tvSrc.category,
+                    is_hd: /1080p/i.test(subName),
+                    series_url: subUrl,
+                    cover_url: pickBestImage(subUrl, imgs),
+                    seasons: null,
+                  });
+                })
+              );
             } else {
+              const inner = await limit(() => fetchDirectoryLinksNative(linkUrl));
+              const imgs = inner.filter((f) => IMAGE_EXT_RE.test(f));
               tvResults.push({
                 id: `tv_${linkUrl}`,
                 type: 'series',
@@ -383,7 +401,7 @@ export default function App() {
                 category: tvSrc.category,
                 is_hd: /1080p/i.test(sName),
                 series_url: linkUrl,
-                cover_url: '',
+                cover_url: pickBestImage(linkUrl, imgs),
                 seasons: null,
               });
             }
