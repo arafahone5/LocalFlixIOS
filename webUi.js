@@ -271,9 +271,143 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
     const DEFAULT_MOVIE_COVER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80';
     const DEFAULT_TV_COVER = 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400&q=80';
 
+    function getMetaCacheKey(title, year, mtype) {
+      const cleanTitle = String(title || '').replace(/\\(.*?\\)|\\[.*?\\]/g, '').replace(/\\b(19\\d{2}|20\\d{2})\\b/g, '').trim();
+      return (cleanTitle + '_' + (year || '') + '_' + (mtype === 'series' ? 'series' : 'movie')).toLowerCase();
+    }
+
     function getCover(item) {
       if (item && item.cover_url) return item.cover_url;
+      if (item) {
+        const cached = DETAILS_CACHE[getMetaCacheKey(item.title, item.year, item.type)];
+        if (cached && (cached.poster || cached.backdrop)) {
+          item.cover_url = cached.poster || cached.backdrop;
+          return item.cover_url;
+        }
+      }
       return item && item.type === 'series' ? DEFAULT_TV_COVER : DEFAULT_MOVIE_COVER;
+    }
+
+    // --- Lazy Poster Loader for Cards Missing Local Thumbnails ---
+    const posterQueue = [];
+    const posterInFlight = new Set();
+    let activePosterWorkers = 0;
+    let detailsSaveTimer = null;
+
+    function scheduleDetailsSave() {
+      if (detailsSaveTimer) return;
+      detailsSaveTimer = setTimeout(function() {
+        detailsSaveTimer = null;
+        nativeSaveStorage('details_cache', JSON.stringify(DETAILS_CACHE));
+      }, 1500);
+    }
+
+    function pumpPosterQueue() {
+      while (activePosterWorkers < 4 && posterQueue.length > 0) {
+        const job = posterQueue.shift();
+        if (!job || !job.imgEl || !job.imgEl.isConnected) {
+          if (job) posterInFlight.delete(job.key);
+          continue;
+        }
+        activePosterWorkers++;
+        fetchCardPosterOnly(job.item)
+          .then(function(url) {
+            if (url && job.imgEl && job.imgEl.isConnected) {
+              job.item.cover_url = url;
+              job.imgEl.src = url;
+            }
+          })
+          .finally(function() {
+            posterInFlight.delete(job.key);
+            activePosterWorkers--;
+            pumpPosterQueue();
+          });
+      }
+    }
+
+    async function fetchCardPosterOnly(item) {
+      const cleanTitle = String(item.title || '').replace(/\\(.*?\\)|\\[.*?\\]/g, '').replace(/\\b(19\\d{2}|20\\d{2})\\b/g, '').trim();
+      if (!cleanTitle) return null;
+      const cType = item.type === 'series' ? 'series' : 'movie';
+      const cacheKey = getMetaCacheKey(item.title, item.year, item.type);
+
+      if (DETAILS_CACHE[cacheKey]) {
+        return DETAILS_CACHE[cacheKey].poster || DETAILS_CACHE[cacheKey].backdrop || null;
+      }
+
+      try {
+        const cRes = await nativeFetch('https://v3-cinemeta.strem.io/catalog/' + cType + '/top/search=' + encodeURIComponent(cleanTitle) + '.json');
+        const cData = JSON.parse(cRes.text || '{}');
+        const metas = cData.metas || [];
+        let posterUrl = null;
+        let backdropUrl = null;
+        let plot = '';
+        let rating = '7.6';
+
+        if (metas.length > 0) {
+          let best = metas[0];
+          if (item.year) {
+            const yrMatch = metas.find(function(m) { return String(m.year || '').includes(String(item.year)); });
+            if (yrMatch) best = yrMatch;
+          }
+          posterUrl = best.poster || best.background || null;
+          backdropUrl = best.background || best.poster || null;
+          if (best.description) plot = best.description;
+          if (best.imdbRating) rating = String(best.imdbRating);
+        }
+
+        DETAILS_CACHE[cacheKey] = {
+          plot: plot || 'High-definition stream ready for native VLC playback on your iPhone.',
+          rating: rating,
+          tomatometer: null,
+          audience_score: null,
+          poster: posterUrl,
+          backdrop: backdropUrl
+        };
+        scheduleDetailsSave();
+        return posterUrl;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    const cardPosterObserver = ('IntersectionObserver' in window)
+      ? new IntersectionObserver(function(entries) {
+          entries.forEach(function(entry) {
+            if (!entry.isIntersecting) return;
+            const img = entry.target;
+            cardPosterObserver.unobserve(img);
+            const item = img._mediaItem;
+            if (!item || item.cover_url) return;
+            const key = getMetaCacheKey(item.title, item.year, item.type);
+            if (posterInFlight.has(key)) return;
+            posterInFlight.add(key);
+            posterQueue.push({ item: item, imgEl: img, key: key });
+            pumpPosterQueue();
+          });
+        }, { rootMargin: '250px' })
+      : null;
+
+    function attachLazyPoster(imgEl, item) {
+      if (!imgEl || !item) return;
+      if (item.cover_url) return;
+      const cached = DETAILS_CACHE[getMetaCacheKey(item.title, item.year, item.type)];
+      if (cached && (cached.poster || cached.backdrop)) {
+        item.cover_url = cached.poster || cached.backdrop;
+        imgEl.src = item.cover_url;
+        return;
+      }
+      imgEl._mediaItem = item;
+      if (cardPosterObserver) {
+        cardPosterObserver.observe(imgEl);
+      } else {
+        const key = getMetaCacheKey(item.title, item.year, item.type);
+        if (!posterInFlight.has(key)) {
+          posterInFlight.add(key);
+          posterQueue.push({ item: item, imgEl: imgEl, key: key });
+          pumpPosterQueue();
+        }
+      }
     }
 
     // --- Native React Native Bridge ---
@@ -632,6 +766,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       const sMatch = String(item.season_key || 'Season 1').match(/\\d+/);
       const sNum = sMatch ? sMatch[0] : '1';
       const epNum = (item.episode_idx !== undefined ? item.episode_idx + 1 : 1);
+      const fallbackUrl = item.type === 'series' ? DEFAULT_TV_COVER : DEFAULT_MOVIE_COVER;
 
       const badgeHtml = item.type === 'series'
         ? '<span class="absolute top-1.5 left-1.5 bg-red-600 text-white font-extrabold text-[9px] px-1.5 py-0.5 rounded shadow">S' + sNum + ':E' + epNum + '</span>'
@@ -643,7 +778,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
 
       card.innerHTML =
         '<div class="relative aspect-[2/3] w-full bg-neutral-950 overflow-hidden">' +
-          '<img src="' + getCover(item) + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + DEFAULT_MOVIE_COVER + '\\'" />' +
+          '<img src="' + getCover(item) + '" class="card-poster-img w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + fallbackUrl + '\\'" />' +
           badgeHtml +
           '<button class="rm-cw-btn absolute top-1.5 right-1.5 z-30 w-5 h-5 rounded-full bg-black/80 text-white text-[10px] font-bold flex items-center justify-center">✕</button>' +
           '<div class="absolute bottom-0 inset-x-0 h-1 bg-red-600"></div>' +
@@ -653,6 +788,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
           '<p class="text-[9px] font-mono text-neutral-400 truncate">' + subLine + '</p>' +
         '</div>';
 
+      attachLazyPoster(card.querySelector('.card-poster-img'), item);
       card.querySelector('.rm-cw-btn').onclick = function(e) { removeFromHistory(item.id, e); };
       card.onclick = function() {
         if (item.type === 'series') openSeriesHub(item);
@@ -807,19 +943,21 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       const card = document.createElement('div');
       card.className = 'card-press cursor-pointer flex flex-col rounded-lg overflow-hidden bg-neutral-900 border border-neutral-800/80 relative';
       const saved = isInWatchlist(item);
+      const fallbackUrl = item.type === 'series' ? DEFAULT_TV_COVER : DEFAULT_MOVIE_COVER;
       const wlClass = saved
         ? 'wl-card-btn absolute bottom-1.5 right-1.5 z-30 w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-black flex items-center justify-center shadow'
         : 'wl-card-btn absolute bottom-1.5 right-1.5 z-30 w-6 h-6 rounded-full bg-black/80 text-white border border-white/30 text-xs font-black flex items-center justify-center shadow';
 
       card.innerHTML =
         '<div class="relative aspect-[2/3] w-full bg-neutral-950 overflow-hidden">' +
-          '<img src="' + getCover(item) + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + DEFAULT_MOVIE_COVER + '\\'" />' +
+          '<img src="' + getCover(item) + '" class="card-poster-img w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + fallbackUrl + '\\'" />' +
           (item.year ? '<span class="absolute top-1.5 left-1.5 bg-black/80 text-neutral-200 font-bold text-[9px] px-1.5 py-0.5 rounded">' + item.year + '</span>' : '') +
           (item.is_hd ? '<span class="absolute top-1.5 right-1.5 bg-red-600 text-white font-bold text-[8px] px-1 py-0.5 rounded">HD</span>' : '') +
           '<button data-id="' + item.id + '" class="' + wlClass + '">' + (saved ? '✓' : '＋') + '</button>' +
         '</div>' +
         '<div class="p-2"><h4 class="text-[11px] font-semibold truncate text-neutral-100">' + item.title + '</h4></div>';
 
+      attachLazyPoster(card.querySelector('.card-poster-img'), item);
       card.querySelector('.wl-card-btn').onclick = function(e) { toggleWatchlist(item, e); };
       card.onclick = function() {
         if (item.type === 'series') openSeriesHub(item);
@@ -830,32 +968,39 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
 
     async function fetchOnlineMetadata(title, year, mtype) {
       const cleanTitle = title.replace(/\\(.*?\\)|\\[.*?\\]/g, '').replace(/\\b(19\\d{2}|20\\d{2})\\b/g, '').trim();
-      const cacheKey = (cleanTitle + '_' + (year || '') + '_' + mtype).toLowerCase();
-      if (DETAILS_CACHE[cacheKey]) return DETAILS_CACHE[cacheKey];
+      const cacheKey = getMetaCacheKey(title, year, mtype);
+      const existing = DETAILS_CACHE[cacheKey];
+      if (existing && (existing.tomatometer || existing.audience_score || existing.checked_rt)) {
+        return existing;
+      }
 
-      let plot = '';
-      let rating = '7.6';
-      let tomatometer = null;
-      let audience_score = null;
-      let backdrop = null;
+      let plot = existing?.plot || '';
+      let rating = existing?.rating || '7.6';
+      let tomatometer = existing?.tomatometer || null;
+      let audience_score = existing?.audience_score || null;
+      let poster = existing?.poster || null;
+      let backdrop = existing?.backdrop || null;
 
-      try {
-        const cType = mtype === 'series' ? 'series' : 'movie';
-        const cRes = await nativeFetch('https://v3-cinemeta.strem.io/catalog/' + cType + '/top/search=' + encodeURIComponent(cleanTitle) + '.json');
-        const cData = JSON.parse(cRes.text || '{}');
-        const metas = cData.metas || [];
-        if (metas.length > 0) {
-          let best = metas[0];
-          if (year) {
-            const yrMatch = metas.find(function(m) { return String(m.year || '').includes(String(year)); });
-            if (yrMatch) best = yrMatch;
+      if (!poster || !backdrop || !plot) {
+        try {
+          const cType = mtype === 'series' ? 'series' : 'movie';
+          const cRes = await nativeFetch('https://v3-cinemeta.strem.io/catalog/' + cType + '/top/search=' + encodeURIComponent(cleanTitle) + '.json');
+          const cData = JSON.parse(cRes.text || '{}');
+          const metas = cData.metas || [];
+          if (metas.length > 0) {
+            let best = metas[0];
+            if (year) {
+              const yrMatch = metas.find(function(m) { return String(m.year || '').includes(String(year)); });
+              if (yrMatch) best = yrMatch;
+            }
+            if (best.description) plot = best.description;
+            if (best.imdbRating) rating = String(best.imdbRating);
+            if (best.poster) poster = best.poster;
+            if (best.background) backdrop = best.background;
+            else if (best.poster) backdrop = best.poster;
           }
-          if (best.description) plot = best.description;
-          if (best.imdbRating) rating = String(best.imdbRating);
-          if (best.background) backdrop = best.background;
-          else if (best.poster) backdrop = best.poster;
-        }
-      } catch (e) {}
+        } catch (e) {}
+      }
 
       try {
         const rtRes = await nativeFetch('https://www.rottentomatoes.com/napi/search/all?searchQuery=' + encodeURIComponent(cleanTitle));
@@ -873,9 +1018,17 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       } catch (e) {}
 
       if (!plot) plot = 'High-definition stream ready for native VLC playback on your iPhone.';
-      const result = { plot: plot, rating: rating, tomatometer: tomatometer, audience_score: audience_score, backdrop: backdrop };
+      const result = {
+        plot: plot,
+        rating: rating,
+        tomatometer: tomatometer,
+        audience_score: audience_score,
+        poster: poster,
+        backdrop: backdrop,
+        checked_rt: true
+      };
       DETAILS_CACHE[cacheKey] = result;
-      nativeSaveStorage('details_cache', JSON.stringify(DETAILS_CACHE));
+      scheduleDetailsSave();
       return result;
     }
 
@@ -901,7 +1054,12 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
 
       fetchOnlineMetadata(item.title, item.year, type).then(function(d) {
         document.getElementById('heroPlot').innerText = d.plot;
-        if (d.backdrop) document.getElementById('heroImage').src = d.backdrop;
+        if (d.backdrop) {
+          document.getElementById('heroImage').src = d.backdrop;
+        }
+        if (!item.cover_url && (d.poster || d.backdrop)) {
+          item.cover_url = d.poster || d.backdrop;
+        }
       });
     }
 
@@ -947,6 +1105,9 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         document.getElementById('previewPopcornBadge').classList.remove('hidden');
       }
       if (d.backdrop) document.getElementById('previewBackdrop').src = d.backdrop;
+      if (!movie.cover_url && (d.poster || d.backdrop)) {
+        movie.cover_url = d.poster || d.backdrop;
+      }
     }
 
     function closePreviewModal() {
@@ -982,6 +1143,9 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       fetchOnlineMetadata(series.title, series.year, 'series').then(function(d) {
         document.getElementById('hubPlot').innerText = d.plot;
         if (d.backdrop) document.getElementById('hubBackdrop').src = d.backdrop;
+        if (!series.cover_url && (d.poster || d.backdrop)) {
+          series.cover_url = d.poster || d.backdrop;
+        }
       });
 
       if (!series.seasons && series.series_url) {
@@ -1050,7 +1214,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         id: currentSeriesObj.id,
         type: 'series',
         title: currentSeriesObj.title,
-        cover_url: currentSeriesObj.cover_url,
+        cover_url: getCover(currentSeriesObj),
         year: currentSeriesObj.year,
         category: currentSeriesObj.category,
         is_hd: currentSeriesObj.is_hd,
@@ -1091,7 +1255,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
             id: currentSeriesObj.id,
             type: 'series',
             title: currentSeriesObj.title,
-            cover_url: currentSeriesObj.cover_url,
+            cover_url: getCover(currentSeriesObj),
             year: currentSeriesObj.year,
             category: currentSeriesObj.category,
             is_hd: currentSeriesObj.is_hd,
