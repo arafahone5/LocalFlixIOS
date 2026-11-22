@@ -218,7 +218,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
     <div id="homeSections" class="space-y-7"></div>
   </main>
 
-  <!-- Movie Preview Modal (Poster Background + Ratings + Synopsis + Open in VLC) -->
+  <!-- Movie Preview Modal -->
   <div id="previewModal" class="fixed inset-0 bg-black/85 backdrop-blur-md z-50 hidden flex items-end sm:items-center justify-center p-3" onclick="closePreviewModal()">
     <div class="relative w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onclick="event.stopPropagation()">
       <button onclick="closePreviewModal()" class="absolute top-3 right-3 z-20 w-8 h-8 rounded-full bg-black/75 text-white flex items-center justify-center text-sm font-bold">✕</button>
@@ -472,6 +472,81 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       document.getElementById('rescanStatusBox').classList.add('hidden');
     }
 
+    // Recursive Movie Folder Scanner (handles year folders like (2024)/ and nested subdirectories)
+    async function scanMovieFolder(folderUrl, folderName, categoryName, isHdSource, depth) {
+      const movies = [];
+      const items = await getDirectoryLinks(folderUrl);
+      if (!items || items.length === 0) return movies;
+
+      const videoFiles = items.filter(function(f) {
+        return /\\.(mp4|mkv|avi|webm)$/i.test(f);
+      });
+      const images = items.filter(function(f) {
+        return /\\.(jpg|jpeg|png|webp)$/i.test(f);
+      });
+      const subdirs = items.filter(function(f) {
+        const lastPart = f.replace(/\\/$/, '').split('/').pop() || '';
+        return f.endsWith('/') || !lastPart.includes('.');
+      });
+
+      if (videoFiles.length > 0) {
+        const filtered = videoFiles.filter(function(f) {
+          return !/sample|trailer|extra/i.test(f);
+        });
+        const candidates = filtered.length > 0 ? filtered : videoFiles;
+        candidates.sort(function(a, b) {
+          function score(fname) {
+            const low = fname.toLowerCase();
+            if (low.includes('2160p') || low.includes('4k')) return 4;
+            if (low.includes('1080p')) return 3;
+            if (low.includes('720p')) return 2;
+            return 1;
+          }
+          return score(b) - score(a);
+        });
+
+        const vid = candidates[0];
+        const vidUrl = resolveUrl(folderUrl, vid);
+        const covUrl = images.length > 0
+          ? resolveUrl(folderUrl, images[0])
+          : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80';
+        const year = extractYear(folderName) || extractYear(vid);
+        const isHd = isHdSource || /1080p/i.test(folderName) || /1080p/i.test(vid);
+
+        movies.push({
+          id: 'mov_' + vidUrl,
+          type: 'movie',
+          title: cleanMovieName(depth > 0 ? folderName : vid),
+          raw_url: vidUrl,
+          is_hd: isHd,
+          year: year,
+          category: categoryName,
+          cover_url: covUrl
+        });
+        return movies;
+      }
+
+      if (depth < 3 && subdirs.length > 0) {
+        const subTasks = subdirs.map(function(sub) {
+          return async function() {
+            const subUrl = resolveUrl(folderUrl, sub);
+            const subTitle = cleanMovieName(sub);
+            return await scanMovieFolder(subUrl, subTitle, categoryName, isHdSource, depth + 1);
+          };
+        });
+        const nestedResults = await runPool(subTasks, 5);
+        nestedResults.forEach(function(arr) {
+          if (arr && arr.length > 0) {
+            for (let i = 0; i < arr.length; i++) {
+              movies.push(arr[i]);
+            }
+          }
+        });
+      }
+
+      return movies;
+    }
+
     async function startBackgroundRescan() {
       if (isScanning) return;
       isScanning = true;
@@ -533,35 +608,19 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
                 category: src.category,
                 cover_url: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80'
               });
-            } else if (link.endsWith('/')) {
-              const subItems = await getDirectoryLinks(itemUrl);
-              const vids = subItems.filter(function(f) { return /\\.(mp4|mkv|avi|webm)$/i.test(f) && !/sample|trailer/i.test(f); });
-              const imgs = subItems.filter(function(f) { return /\\.(jpg|jpeg|png|webp)$/i.test(f); });
-              if (vids.length > 0) {
-                vids.sort(function(a, b) { return (/1080p/i.test(b) ? 1 : 0) - (/1080p/i.test(a) ? 1 : 0); });
-                const vidUrl = resolveUrl(itemUrl, vids[0]);
-                const covUrl = imgs.length > 0 ? resolveUrl(itemUrl, imgs[0]) : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80';
-                movieResults.push({
-                  id: 'mov_' + vidUrl,
-                  type: 'movie',
-                  title: cleanName,
-                  raw_url: vidUrl,
-                  is_hd: src.is_hd || /1080p/i.test(link) || /1080p/i.test(vids[0]),
-                  year: extractYear(link) || extractYear(vids[0]),
-                  category: src.category,
-                  cover_url: covUrl
-                });
+            } else {
+              const found = await scanMovieFolder(itemUrl, cleanName, src.category, src.is_hd, 1);
+              for (let i = 0; i < found.length; i++) {
+                movieResults.push(found[i]);
               }
             }
             doneSub++;
-            if (doneSub % 10 === 0) {
-              const pct = Math.min(98, Math.max(1, Math.round(((completedSources + (doneSub / totalSub)) / totalSources) * 100)));
-              updateProgress('Movies: ' + src.name, pct);
-            }
+            const pct = Math.min(98, Math.max(1, Math.round(((completedSources + (doneSub / totalSub)) / totalSources) * 100)));
+            updateProgress('Movies: ' + src.name, pct);
           };
         });
 
-        await runPool(tasks, 10);
+        await runPool(tasks, 6);
         completedSources++;
         updateProgress('Movies: ' + src.name);
       }
@@ -580,20 +639,25 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         updateProgress('TV: ' + tvSrc.name);
         const rootLinks = await getDirectoryLinks(tvSrc.url);
         for (const link of rootLinks) {
-          if (!link.endsWith('/')) continue;
+          const lastPart = link.replace(/\\/$/, '').split('/').pop() || '';
+          if (!link.endsWith('/') && lastPart.includes('.')) continue;
+
           const linkUrl = resolveUrl(tvSrc.url, link);
-          const sName = decodeURIComponent(link.replace(/\\/$/, '').split('/').pop() || '');
-          if (/^(19|20)\\d{2}$/.test(sName.trim())) {
+          const sName = decodeURIComponent(lastPart);
+          const bareYear = sName.replace(/[()]/g, '').trim();
+
+          if (/^(19|20)\\d{2}$/.test(bareYear)) {
             const subLinks = await getDirectoryLinks(linkUrl);
             subLinks.forEach(function(slink) {
-              if (!slink.endsWith('/')) return;
+              const subPart = slink.replace(/\\/$/, '').split('/').pop() || '';
+              if (!slink.endsWith('/') && subPart.includes('.')) return;
               const subUrl = resolveUrl(linkUrl, slink);
-              const subName = decodeURIComponent(slink.replace(/\\/$/, '').split('/').pop() || '');
+              const subName = decodeURIComponent(subPart);
               tvResults.push({
                 id: 'tv_' + subUrl,
                 type: 'series',
                 title: cleanMovieName(subName),
-                year: extractYear(subName) || parseInt(sName, 10),
+                year: extractYear(subName) || parseInt(bareYear, 10),
                 category: tvSrc.category,
                 is_hd: /1080p/i.test(subName),
                 series_url: subUrl,
@@ -706,7 +770,6 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       });
     }
 
-    // Renders Row 1: Continue Watching, Row 2: Watch Later
     function renderTopPersonalShelves() {
       const existingCW = document.getElementById('continueWatchingSection');
       if (existingCW) existingCW.remove();
@@ -716,7 +779,6 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       const container = document.getElementById('homeSections');
       if (!container) return;
 
-      // 1. Prepend Watch Later first so Continue Watching lands right above it
       const wlItems = currentNavMode === 'tv'
         ? watchlistItems.filter(function(x) { return x.type === 'series'; })
         : watchlistItems;
@@ -741,7 +803,6 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         container.prepend(wlSec);
       }
 
-      // 2. Prepend Continue Watching at the very top
       const cwItems = currentNavMode === 'tv'
         ? watchHistoryList.filter(function(x) { return x.type === 'series'; })
         : watchHistoryList;
