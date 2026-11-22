@@ -484,22 +484,16 @@ export default function App() {
       const callbackUri = `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(cleanUrl)}`;
       const fallbackUri = `vlc://${cleanUrl}`;
       try {
-        const canCallback = await Linking.canOpenURL(callbackUri);
-        if (canCallback) {
-          await Linking.openURL(callbackUri);
-          return;
-        }
-        const canFallback = await Linking.canOpenURL(fallbackUri);
-        if (canFallback) {
+        await Linking.openURL(callbackUri);
+      } catch (e1) {
+        try {
           await Linking.openURL(fallbackUri);
-          return;
+        } catch (e2) {
+          Alert.alert(
+            'VLC Not Found',
+            'Install "VLC media player" from the iOS App Store, or tap Copy Link to paste into VLC.'
+          );
         }
-        Alert.alert(
-          'VLC Not Found',
-          'Install "VLC media player" from the iOS App Store, or tap Copy Link to paste into VLC.'
-        );
-      } catch (e) {
-        Alert.alert('VLC Launch Error', e.message);
       }
     } else if (msg.type === 'COPY_TEXT') {
       await Clipboard.setStringAsync(msg.text);
