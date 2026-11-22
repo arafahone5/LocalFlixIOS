@@ -1,0 +1,36 @@
+name: Build LocalFlix iOS IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npx expo prebuild --platform ios --clean
+      - name: Build Unsigned IPA
+        run: |
+          cd ios
+          xcodebuild -workspace LocalFlix.xcworkspace \
+            -scheme LocalFlix \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r ios/build/Build/Products/Release-iphoneos/LocalFlix.app Payload/
+          zip -r LocalFlix.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalFlix-iOS-IPA
+          path: LocalFlix.ipa

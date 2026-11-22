@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "LocalFlix",
+    "slug": "localflix-ios",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "com.localflix.iosapp",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        },
+        "NSLocalNetworkUsageDescription": "LocalFlix needs local Wi-Fi access to scan and stream from your media servers.",
+        "LSApplicationQueriesSchemes": [
+          "vlc",
+          "vlc-x-callback"
+        ]
+      }
+    }
+  }
+}
