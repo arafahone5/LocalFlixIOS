@@ -14,6 +14,49 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Generate App Icon (Red L on Black)
+        run: |
+          mkdir -p assets
+          python3 - << 'EOF'
+          import zlib, struct
+
+          size = 1024
+          bg = b"\x00\x00\x00"      # Pure black
+          fg = b"\xe5\x09\x14"      # Netflix red
+
+          x0, x1, x2 = 290, 445, 734
+          y0, y1, y2 = 220, 654, 804
+
+          empty_row = b"\x00" + bg * size
+          stem_row  = b"\x00" + bg * x0 + fg * (x1 - x0) + bg * (size - x1)
+          base_row  = b"\x00" + bg * x0 + fg * (x2 - x0) + bg * (size - x2)
+
+          raw = (
+              empty_row * y0
+              + stem_row * (y1 - y0)
+              + base_row * (y2 - y1)
+              + empty_row * (size - y2)
+          )
+
+          def chunk(tag, data):
+              return (
+                  struct.pack("!I", len(data))
+                  + tag
+                  + data
+                  + struct.pack("!I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+              )
+
+          ihdr = struct.pack("!IIBBBBB", size, size, 8, 2, 0, 0, 0)
+          png = (
+              b"\x89PNG\r\n\x1a\n"
+              + chunk(b"IHDR", ihdr)
+              + chunk(b"IDAT", zlib.compress(raw, 9))
+              + chunk(b"IEND", b"")
+          )
+          with open("assets/icon.png", "wb") as f:
+              f.write(png)
+          print("Generated 1024x1024 assets/icon.png")
+          EOF
       - name: Install Dependencies & Prebuild iOS
         run: |
           npm install
