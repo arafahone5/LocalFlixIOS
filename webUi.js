@@ -143,7 +143,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
     <!-- Empty State Before First Scan -->
     <section id="emptyStateBox" class="hidden text-center py-16 px-6 bg-neutral-900/60 border border-neutral-800 rounded-2xl space-y-4">
       <h2 class="text-xl font-black text-white">Connect to Home Wi-Fi & Index Catalog</h2>
-      <p class="text-xs text-neutral-400 leading-relaxed">Tap below to scan your BDIX media servers directly from your iPhone. Once indexed, everything stays cached offline on your phone.</p>
+      <p class="text-xs text-neutral-400 leading-relaxed">Tap below to scan your BDIX media servers directly from your iPhone. Keep the app open during the scan—your screen will stay awake automatically and categories save as they finish.</p>
       <button onclick="startBackgroundRescan()" class="bg-red-600 text-white font-extrabold text-xs px-6 py-3 rounded-full shadow-lg">↻ Start Server Scan</button>
     </section>
 
@@ -214,7 +214,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       </div>
     </section>
 
-    <!-- Home Shelves (Continue Watching + Watch Later + Trending + Genres) -->
+    <!-- Home Shelves -->
     <div id="homeSections" class="space-y-7"></div>
   </main>
 
@@ -268,6 +268,14 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
   </div>
 
   <script>
+    const DEFAULT_MOVIE_COVER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80';
+    const DEFAULT_TV_COVER = 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400&q=80';
+
+    function getCover(item) {
+      if (item && item.cover_url) return item.cover_url;
+      return item && item.type === 'series' ? DEFAULT_TV_COVER : DEFAULT_MOVIE_COVER;
+    }
+
     // --- Native React Native Bridge ---
     const pendingNativeCalls = {};
     let nativeReqCounter = 1;
@@ -327,6 +335,54 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       }
     }
 
+    function startBackgroundRescan() {
+      if (isScanning) return;
+      isScanning = true;
+      document.getElementById('emptyStateBox').classList.add('hidden');
+      document.getElementById('rescanStatusBox').classList.remove('hidden');
+      document.getElementById('rescanIcon').classList.add('animate-spin');
+      document.getElementById('rescanBtnText').innerText = 'Scanning';
+      document.getElementById('rescanStageText').innerText = 'Starting native high-speed scan...';
+      document.getElementById('rescanProgressBar').style.width = '1%';
+      document.getElementById('rescanProgressBar').className = 'h-full bg-red-600 rounded-full transition-all duration-300';
+
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'START_SCAN' }));
+      }
+    }
+
+    function handleScanProgress(msg) {
+      const box = document.getElementById('rescanStatusBox');
+      const stageEl = document.getElementById('rescanStageText');
+      const timerEl = document.getElementById('rescanTimerText');
+      const barEl = document.getElementById('rescanProgressBar');
+      const countsEl = document.getElementById('rescanCountsText');
+      const pctEl = document.getElementById('rescanPercentText');
+      const iconEl = document.getElementById('rescanIcon');
+      const btnText = document.getElementById('rescanBtnText');
+
+      box.classList.remove('hidden');
+      stageEl.innerText = msg.label || 'Scanning...';
+      barEl.style.width = (msg.pct || 0) + '%';
+      countsEl.innerText = (msg.movieCount || 0).toLocaleString() + ' movies • ' + (msg.tvCount || 0).toLocaleString() + ' series';
+      pctEl.innerText = (msg.pct || 0) + '%';
+
+      const elapsed = msg.elapsedSec || 0.1;
+      if (msg.done) {
+        timerEl.innerText = 'Done in ' + formatShortTime(elapsed);
+        barEl.className = 'h-full bg-emerald-500 rounded-full transition-all duration-300';
+        iconEl.classList.remove('animate-spin');
+        btnText.innerText = 'Rescan';
+        isScanning = false;
+        setTimeout(dismissRescanBox, 6000);
+      } else {
+        const frac = (msg.pct || 0) / 100;
+        const etaStr = frac >= 0.04 ? 'ETA ' + formatShortTime((elapsed / frac) - elapsed) : 'Estimating...';
+        timerEl.innerText = formatShortTime(elapsed) + ' • ' + etaStr;
+        barEl.className = 'h-full bg-red-600 rounded-full transition-all duration-300';
+      }
+    }
+
     window.onNativeMessage = function(msg) {
       if (!msg) return;
       if (msg.type === 'FETCH_RESULT' && pendingNativeCalls[msg.id]) {
@@ -334,36 +390,29 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         delete pendingNativeCalls[msg.id];
         if (msg.error) cb.reject(new Error(msg.error));
         else cb.resolve(msg);
-      } else if (msg.type === 'INIT_STORAGE') {
-        if (msg.movies) MOVIE_CATALOG = msg.movies;
-        if (msg.tv) TV_CATALOG = msg.tv;
-        if (msg.watchlist) watchlistItems = msg.watchlist;
-        if (msg.history) watchHistoryList = msg.history;
-        if (msg.details) DETAILS_CACHE = msg.details;
-        bootAppAfterStorage();
+      } else if (msg.type === 'CATALOG_BEGIN') {
+        MOVIE_CATALOG = [];
+        TV_CATALOG = [];
+        if (msg.watchlist !== null && msg.watchlist !== undefined) watchlistItems = msg.watchlist;
+        if (msg.history !== null && msg.history !== undefined) watchHistoryList = msg.history;
+        if (msg.details !== null && msg.details !== undefined) DETAILS_CACHE = msg.details;
+      } else if (msg.type === 'CATALOG_CHUNK') {
+        const targetArr = msg.target === 'tv' ? TV_CATALOG : MOVIE_CATALOG;
+        const chunk = msg.items || [];
+        for (let i = 0; i < chunk.length; i++) {
+          targetArr.push(chunk[i]);
+        }
+      } else if (msg.type === 'CATALOG_END') {
+        if (msg.isInitialBoot) {
+          bootAppAfterStorage();
+        } else {
+          if (currentNavMode === 'movies') loadMoviesHome(activeCategoryTab);
+          else loadTVHome(activeCategoryTab);
+        }
+      } else if (msg.type === 'SCAN_PROGRESS') {
+        handleScanProgress(msg);
       }
     };
-
-    // --- Sources & Genre Rules ---
-    const MOVIE_SOURCES = [
-      { category: "English", name: "English 1080p", url: "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/", is_hd: true },
-      { category: "English", name: "English Movies", url: "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/", is_hd: false },
-      { category: "Hindi", name: "Hindi Movies", url: "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/", is_hd: false },
-      { category: "South Hindi", name: "South Hindi Dubbed", url: "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/", is_hd: false },
-      { category: "South", name: "South Movies", url: "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/South%20Movies/", is_hd: false },
-      { category: "Foreign", name: "Foreign Movies", url: "http://172.16.50.7/DHAKA-FLIX-7/Foreign%20Language%20Movies/", is_hd: false },
-      { category: "Kolkata Bangla", name: "Kolkata Movies", url: "http://172.16.50.7/DHAKA-FLIX-7/Kolkata%20Bangla%20Movies/", is_hd: false },
-      { category: "Animation", name: "Animation 1080p", url: "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies%20%281080p%29/", is_hd: true },
-      { category: "Animation", name: "Animation Movies", url: "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/", is_hd: false }
-    ];
-
-    const TV_SOURCES = [
-      { category: "English & Web Series", name: "TV Series (0-9)", url: "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%98%85%20%200%20%20%E2%80%94%20%209/" },
-      { category: "English & Web Series", name: "TV Series (A-L)", url: "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/" },
-      { category: "English & Web Series", name: "TV Series (M-R)", url: "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A6%20%20M%20%20%E2%80%94%20%20R/" },
-      { category: "English & Web Series", name: "TV Series (S-Z)", url: "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A6%20%20S%20%20%E2%80%94%20%20Z/" },
-      { category: "Korean TV Series", name: "Korean TV Series", url: "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/" }
-    ];
 
     const NETFLIX_TRENDING_KEYWORDS = [
       'gladiator', 'dune', 'avatar', 'oppenheimer', 'leave the world behind',
@@ -397,18 +446,6 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
     let isScanning = false;
     let searchDebounce = null;
 
-    function cleanMovieName(raw) {
-      let name = decodeURIComponent(raw.replace(/\\\\/g, '/').replace(/\\/$/, '').split('/').pop() || '');
-      name = name.replace(/\\.(mp4|mkv|avi|webm)$/i, '');
-      name = name.replace(/(1080p|720p|2160p|4k|bluray|web-dl|webrip|brrip|x264|x265|hevc|aac|dts|hdrip).*/i, '');
-      return name.replace(/[._]/g, ' ').trim();
-    }
-
-    function extractYear(text) {
-      const m = text.match(/\\b(19\\d{2}|20\\d{2})\\b/);
-      return m ? parseInt(m[1], 10) : 0;
-    }
-
     function resolveUrl(base, href) {
       if (/^https?:\\/\\//i.test(href)) return href;
       if (href.startsWith('/')) {
@@ -416,6 +453,10 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
         return origin + href;
       }
       return base.endsWith('/') ? base + href : base + '/' + href;
+    }
+
+    function safeDecode(s) {
+      try { return decodeURIComponent(s); } catch (e) { return s; }
     }
 
     function formatRelativeTime(ts) {
@@ -430,37 +471,6 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       return days + 'd ago';
     }
 
-    async function getDirectoryLinks(url) {
-      try {
-        const res = await nativeFetch(url);
-        if (!res || !res.ok || !res.text) return [];
-        const doc = new DOMParser().parseFromString(res.text, 'text/html');
-        const links = [];
-        doc.querySelectorAll('a').forEach(function(a) {
-          const href = a.getAttribute('href');
-          const txt = (a.textContent || '').trim();
-          if (!href || href.startsWith('?') || href === '../' || href === '/' || href === './' || txt.includes('Parent Directory')) return;
-          links.push(href);
-        });
-        return links;
-      } catch (e) {
-        return [];
-      }
-    }
-
-    async function runPool(tasks, concurrency) {
-      const out = [];
-      let idx = 0;
-      async function worker() {
-        while (idx < tasks.length) {
-          const cur = idx++;
-          out[cur] = await tasks[cur]();
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
-      return out;
-    }
-
     function formatShortTime(sec) {
       const s = Math.max(0, Math.floor(sec));
       const m = Math.floor(s / 60);
@@ -472,236 +482,23 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       document.getElementById('rescanStatusBox').classList.add('hidden');
     }
 
-    // Recursive Movie Folder Scanner (handles year folders like (2024)/ and nested subdirectories)
-    async function scanMovieFolder(folderUrl, folderName, categoryName, isHdSource, depth) {
-      const movies = [];
-      const items = await getDirectoryLinks(folderUrl);
-      if (!items || items.length === 0) return movies;
-
-      const videoFiles = items.filter(function(f) {
-        return /\\.(mp4|mkv|avi|webm)$/i.test(f);
-      });
-      const images = items.filter(function(f) {
-        return /\\.(jpg|jpeg|png|webp)$/i.test(f);
-      });
-      const subdirs = items.filter(function(f) {
-        const lastPart = f.replace(/\\/$/, '').split('/').pop() || '';
-        return f.endsWith('/') || !lastPart.includes('.');
-      });
-
-      if (videoFiles.length > 0) {
-        const filtered = videoFiles.filter(function(f) {
-          return !/sample|trailer|extra/i.test(f);
-        });
-        const candidates = filtered.length > 0 ? filtered : videoFiles;
-        candidates.sort(function(a, b) {
-          function score(fname) {
-            const low = fname.toLowerCase();
-            if (low.includes('2160p') || low.includes('4k')) return 4;
-            if (low.includes('1080p')) return 3;
-            if (low.includes('720p')) return 2;
-            return 1;
-          }
-          return score(b) - score(a);
-        });
-
-        const vid = candidates[0];
-        const vidUrl = resolveUrl(folderUrl, vid);
-        const covUrl = images.length > 0
-          ? resolveUrl(folderUrl, images[0])
-          : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80';
-        const year = extractYear(folderName) || extractYear(vid);
-        const isHd = isHdSource || /1080p/i.test(folderName) || /1080p/i.test(vid);
-
-        movies.push({
-          id: 'mov_' + vidUrl,
-          type: 'movie',
-          title: cleanMovieName(depth > 0 ? folderName : vid),
-          raw_url: vidUrl,
-          is_hd: isHd,
-          year: year,
-          category: categoryName,
-          cover_url: covUrl
-        });
-        return movies;
-      }
-
-      if (depth < 3 && subdirs.length > 0) {
-        const subTasks = subdirs.map(function(sub) {
-          return async function() {
-            const subUrl = resolveUrl(folderUrl, sub);
-            const subTitle = cleanMovieName(sub);
-            return await scanMovieFolder(subUrl, subTitle, categoryName, isHdSource, depth + 1);
-          };
-        });
-        const nestedResults = await runPool(subTasks, 5);
-        nestedResults.forEach(function(arr) {
-          if (arr && arr.length > 0) {
-            for (let i = 0; i < arr.length; i++) {
-              movies.push(arr[i]);
-            }
-          }
-        });
-      }
-
-      return movies;
-    }
-
-    async function startBackgroundRescan() {
-      if (isScanning) return;
-      isScanning = true;
-      document.getElementById('emptyStateBox').classList.add('hidden');
-
-      const box = document.getElementById('rescanStatusBox');
-      const stageEl = document.getElementById('rescanStageText');
-      const timerEl = document.getElementById('rescanTimerText');
-      const barEl = document.getElementById('rescanProgressBar');
-      const countsEl = document.getElementById('rescanCountsText');
-      const pctEl = document.getElementById('rescanPercentText');
-      const iconEl = document.getElementById('rescanIcon');
-      const btnText = document.getElementById('rescanBtnText');
-
-      box.classList.remove('hidden');
-      iconEl.classList.add('animate-spin');
-      btnText.innerText = 'Scanning';
-
-      const totalSources = MOVIE_SOURCES.length + TV_SOURCES.length;
-      let completedSources = 0;
-      const startTs = Date.now();
-      const movieResults = [];
-      const tvResults = [];
-
-      function updateProgress(label, pctOverride) {
-        const elapsed = Math.max(0.1, (Date.now() - startTs) / 1000);
-        const pct = pctOverride !== undefined ? pctOverride : Math.min(99, Math.max(1, Math.round((completedSources / totalSources) * 100)));
-        const frac = pct / 100;
-        const etaStr = frac >= 0.04 ? 'ETA ' + formatShortTime((elapsed / frac) - elapsed) : 'Estimating...';
-
-        stageEl.innerText = label;
-        timerEl.innerText = formatShortTime(elapsed) + ' • ' + etaStr;
-        barEl.style.width = pct + '%';
-        barEl.className = 'h-full bg-red-600 rounded-full transition-all duration-300';
-        countsEl.innerText = movieResults.length.toLocaleString() + ' movies • ' + tvResults.length.toLocaleString() + ' series';
-        pctEl.innerText = pct + '%';
-      }
-
-      updateProgress('Connecting to BDIX servers...', 1);
-
-      for (const src of MOVIE_SOURCES) {
-        updateProgress('Movies: ' + src.name);
-        const rootLinks = await getDirectoryLinks(src.url);
-        let doneSub = 0;
-        const totalSub = Math.max(1, rootLinks.length);
-
-        const tasks = rootLinks.map(function(link) {
-          return async function() {
-            const itemUrl = resolveUrl(src.url, link);
-            const cleanName = cleanMovieName(link);
-            if (/\\.(mp4|mkv|avi|webm)$/i.test(link)) {
-              movieResults.push({
-                id: 'mov_' + itemUrl,
-                type: 'movie',
-                title: cleanName,
-                raw_url: itemUrl,
-                is_hd: src.is_hd || /1080p/i.test(link),
-                year: extractYear(link),
-                category: src.category,
-                cover_url: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80'
-              });
-            } else {
-              const found = await scanMovieFolder(itemUrl, cleanName, src.category, src.is_hd, 1);
-              for (let i = 0; i < found.length; i++) {
-                movieResults.push(found[i]);
-              }
-            }
-            doneSub++;
-            const pct = Math.min(98, Math.max(1, Math.round(((completedSources + (doneSub / totalSub)) / totalSources) * 100)));
-            updateProgress('Movies: ' + src.name, pct);
-          };
-        });
-
-        await runPool(tasks, 6);
-        completedSources++;
-        updateProgress('Movies: ' + src.name);
-      }
-
-      const uniqueMovies = {};
-      movieResults.forEach(function(m) {
-        const key = m.title.toLowerCase() + '_' + m.category;
-        if (!uniqueMovies[key] || (m.is_hd && !uniqueMovies[key].is_hd)) {
-          uniqueMovies[key] = m;
+    async function getDirectoryLinks(url) {
+      try {
+        const res = await nativeFetch(url);
+        if (!res || !res.ok || !res.text) return [];
+        const links = [];
+        const regex = /<a\\s+[^>]*href=["']([^"']+)["'][^>]*>([\\s\\S]*?)<\\/a>/gi;
+        let match;
+        while ((match = regex.exec(res.text)) !== null) {
+          const href = match[1].trim();
+          const txt = match[2].replace(/<[^>]+>/g, '').trim();
+          if (!href || href.startsWith('?') || href === '../' || href === '/' || href === './' || /parent directory/i.test(txt)) continue;
+          links.push(href);
         }
-      });
-      MOVIE_CATALOG = Object.values(uniqueMovies).sort(function(a, b) { return b.year - a.year; });
-      nativeSaveStorage('movies_cache', JSON.stringify(MOVIE_CATALOG));
-
-      for (const tvSrc of TV_SOURCES) {
-        updateProgress('TV: ' + tvSrc.name);
-        const rootLinks = await getDirectoryLinks(tvSrc.url);
-        for (const link of rootLinks) {
-          const lastPart = link.replace(/\\/$/, '').split('/').pop() || '';
-          if (!link.endsWith('/') && lastPart.includes('.')) continue;
-
-          const linkUrl = resolveUrl(tvSrc.url, link);
-          const sName = decodeURIComponent(lastPart);
-          const bareYear = sName.replace(/[()]/g, '').trim();
-
-          if (/^(19|20)\\d{2}$/.test(bareYear)) {
-            const subLinks = await getDirectoryLinks(linkUrl);
-            subLinks.forEach(function(slink) {
-              const subPart = slink.replace(/\\/$/, '').split('/').pop() || '';
-              if (!slink.endsWith('/') && subPart.includes('.')) return;
-              const subUrl = resolveUrl(linkUrl, slink);
-              const subName = decodeURIComponent(subPart);
-              tvResults.push({
-                id: 'tv_' + subUrl,
-                type: 'series',
-                title: cleanMovieName(subName),
-                year: extractYear(subName) || parseInt(bareYear, 10),
-                category: tvSrc.category,
-                is_hd: /1080p/i.test(subName),
-                series_url: subUrl,
-                cover_url: 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400&q=80',
-                seasons: null
-              });
-            });
-          } else {
-            tvResults.push({
-              id: 'tv_' + linkUrl,
-              type: 'series',
-              title: cleanMovieName(sName),
-              year: extractYear(sName),
-              category: tvSrc.category,
-              is_hd: /1080p/i.test(sName),
-              series_url: linkUrl,
-              cover_url: 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400&q=80',
-              seasons: null
-            });
-          }
-        }
-        completedSources++;
-        updateProgress('TV: ' + tvSrc.name);
+        return links;
+      } catch (e) {
+        return [];
       }
-
-      TV_CATALOG = tvResults.sort(function(a, b) { return b.year - a.year; });
-      nativeSaveStorage('tv_cache', JSON.stringify(TV_CATALOG));
-
-      const totalElapsed = Math.round((Date.now() - startTs) / 1000);
-      stageEl.innerText = 'Scan Complete!';
-      timerEl.innerText = 'Done in ' + formatShortTime(totalElapsed);
-      barEl.style.width = '100%';
-      barEl.className = 'h-full bg-emerald-500 rounded-full transition-all duration-300';
-      countsEl.innerText = MOVIE_CATALOG.length.toLocaleString() + ' movies • ' + TV_CATALOG.length.toLocaleString() + ' series';
-      pctEl.innerText = '100%';
-
-      iconEl.classList.remove('animate-spin');
-      btnText.innerText = 'Rescan';
-      isScanning = false;
-
-      if (currentNavMode === 'movies') loadMoviesHome(activeCategoryTab);
-      else loadTVHome(activeCategoryTab);
-
-      setTimeout(dismissRescanBox, 6000);
     }
 
     // --- Watch History / Continue Watching Engine ---
@@ -846,7 +643,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
 
       card.innerHTML =
         '<div class="relative aspect-[2/3] w-full bg-neutral-950 overflow-hidden">' +
-          '<img src="' + item.cover_url + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80\\'" />' +
+          '<img src="' + getCover(item) + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + DEFAULT_MOVIE_COVER + '\\'" />' +
           badgeHtml +
           '<button class="rm-cw-btn absolute top-1.5 right-1.5 z-30 w-5 h-5 rounded-full bg-black/80 text-white text-[10px] font-bold flex items-center justify-center">✕</button>' +
           '<div class="absolute bottom-0 inset-x-0 h-1 bg-red-600"></div>' +
@@ -1016,7 +813,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
 
       card.innerHTML =
         '<div class="relative aspect-[2/3] w-full bg-neutral-950 overflow-hidden">' +
-          '<img src="' + item.cover_url + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400&q=80\\'" />' +
+          '<img src="' + getCover(item) + '" class="w-full h-full object-cover" loading="lazy" onerror="this.src=\\'' + DEFAULT_MOVIE_COVER + '\\'" />' +
           (item.year ? '<span class="absolute top-1.5 left-1.5 bg-black/80 text-neutral-200 font-bold text-[9px] px-1.5 py-0.5 rounded">' + item.year + '</span>' : '') +
           (item.is_hd ? '<span class="absolute top-1.5 right-1.5 bg-red-600 text-white font-bold text-[8px] px-1 py-0.5 rounded">HD</span>' : '') +
           '<button data-id="' + item.id + '" class="' + wlClass + '">' + (saved ? '✓' : '＋') + '</button>' +
@@ -1087,7 +884,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       currentHeroItem = item;
       document.getElementById('heroBillboard').classList.remove('hidden');
       document.getElementById('heroTitle').innerText = item.title;
-      document.getElementById('heroImage').src = item.cover_url;
+      document.getElementById('heroImage').src = getCover(item);
       document.getElementById('heroBadge').innerText = item.category || 'Featured';
       document.getElementById('heroWatchlistBtn').onclick = function(e) { toggleWatchlist(item, e); };
       syncAllWatchlistButtons();
@@ -1112,7 +909,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       currentMovie = movie;
       document.getElementById('previewTitle').innerText = movie.title;
       document.getElementById('previewYearBadge').innerText = movie.year || '';
-      document.getElementById('previewBackdrop').src = movie.cover_url;
+      document.getElementById('previewBackdrop').src = getCover(movie);
       document.getElementById('previewPlot').innerText = 'Loading synopsis & ratings...';
       document.getElementById('previewRatingBadge').innerText = 'IMDb ...';
       document.getElementById('previewTomatoBadge').classList.add('hidden');
@@ -1178,7 +975,7 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
       hub.classList.remove('hidden');
       document.getElementById('hubTitle').innerText = series.title;
       document.getElementById('hubCategoryBadge').innerText = series.category || 'Series';
-      document.getElementById('hubBackdrop').src = series.cover_url;
+      document.getElementById('hubBackdrop').src = getCover(series);
       document.getElementById('hubPlot').innerText = 'Loading episodes...';
       syncAllWatchlistButtons();
 
@@ -1198,18 +995,18 @@ export const LOCALFLIX_HTML = `<!DOCTYPE html>
             const sUrl = resolveUrl(series.series_url, subdirs[i]);
             const epItems = await getDirectoryLinks(sUrl);
             const epVids = epItems.filter(function(f) { return /\\.(mp4|mkv|avi|webm)$/i.test(f) && !/sample|trailer/i.test(f); })
-              .sort(function(a, b) { return decodeURIComponent(a).localeCompare(decodeURIComponent(b), undefined, { numeric: true }); });
+              .sort(function(a, b) { return safeDecode(a).localeCompare(safeDecode(b), undefined, { numeric: true }); });
             if (epVids.length > 0) {
-              const label = decodeURIComponent(subdirs[i].replace(/\\/$/, ''));
+              const label = safeDecode(subdirs[i].replace(/\\/$/, '').split('/').pop() || subdirs[i]);
               seasons[label] = epVids.map(function(v, idx) {
-                return { title: 'Episode ' + (idx + 1), filename: decodeURIComponent(v), raw_url: resolveUrl(sUrl, v) };
+                return { title: 'Episode ' + (idx + 1), filename: safeDecode(v.split('/').pop() || v), raw_url: resolveUrl(sUrl, v) };
               });
             }
           }
         } else if (directVids.length > 0) {
-          directVids.sort(function(a, b) { return decodeURIComponent(a).localeCompare(decodeURIComponent(b), undefined, { numeric: true }); });
+          directVids.sort(function(a, b) { return safeDecode(a).localeCompare(safeDecode(b), undefined, { numeric: true }); });
           seasons['Season 1'] = directVids.map(function(v, idx) {
-            return { title: 'Episode ' + (idx + 1), filename: decodeURIComponent(v), raw_url: resolveUrl(series.series_url, v) };
+            return { title: 'Episode ' + (idx + 1), filename: safeDecode(v.split('/').pop() || v), raw_url: resolveUrl(series.series_url, v) };
           });
         }
         series.seasons = seasons;
